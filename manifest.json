@@ -1,0 +1,19 @@
+{
+  "name": "Tailwind CSS v4 Theme",
+  "id": "1582270434779042899",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": ["codegen"],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "editorType": ["dev"],
+  "codegenLanguages": [
+    {
+      "label": "Tailwind CSS",
+      "value": "tailwindcss"
+    }
+  ],
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}
