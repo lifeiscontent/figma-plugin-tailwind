@@ -77,6 +77,202 @@ function sanitizeName(name: string): string {
     .toLowerCase();
 }
 
+const TAILWIND_COLOR_NAMESPACES = [
+  "color",
+  "background-color",
+  "text-color",
+  "border-color",
+  "outline-color",
+  "ring-color",
+  "divide-color",
+  "fill",
+  "shadow-color",
+  "custom",
+] as const;
+
+type TailwindColorNamespace = (typeof TAILWIND_COLOR_NAMESPACES)[number];
+
+type ColorEmission = {
+  namespace: TailwindColorNamespace;
+  cssVarName: string;
+};
+
+type VariableMeta = {
+  hiddenFromPublishing: boolean;
+  scopes: ReadonlyArray<VariableScope>;
+  codeSyntaxWeb?: string;
+  colorEmissions: Map<TailwindColorNamespace, string>;
+};
+
+function splitNameAndLeafVariants(name: string): {
+  baseName: string;
+  leafVariants: string[];
+} {
+  const segments = name.split("/");
+  const variantIdx = segments.indexOf("@variant");
+  if (variantIdx > 0 && variantIdx < segments.length - 1) {
+    const baseName = segments.slice(0, variantIdx).join("/");
+    const leafVariants = segments[variantIdx + 1]
+      .split(",")
+      .map((v) => sanitizeName(v.trim()))
+      .filter(Boolean);
+    return { baseName, leafVariants };
+  }
+  return { baseName: name, leafVariants: [] };
+}
+
+const DESIGNER_FRIENDLY_COLOR_PREFIXES = new Set([
+  // General
+  "colors",
+  "colour",
+  "colours",
+
+  // Background-ish
+  "bg",
+  "background",
+  "backgrounds",
+
+  // Text-ish
+  "text",
+  "type",
+  "typography",
+  "fill-text",
+  "text-fill",
+
+  // Stroke / border-ish
+  "stroke",
+  "strokes",
+  "border",
+  "borders",
+  "outline",
+  "ring",
+  "divide",
+
+  // SVG fill-ish
+  "fill",
+  "fills",
+  "shape-fill",
+  "shape",
+
+  // Effects
+  "effect",
+  "effects",
+  "shadow",
+  "shadows",
+]);
+
+function stripLeadingTailwindNamespaceFromName(name: string): string {
+  const segments = name.split("/");
+  if (segments.length === 0) return name;
+  const first = segments[0] as TailwindColorNamespace;
+  if (TAILWIND_COLOR_NAMESPACES.includes(first)) {
+    return segments.slice(1).join("/");
+  }
+  return name;
+}
+
+function stripLeadingDesignerFriendlyPrefix(name: string): string {
+  const segments = name.split("/");
+
+  // Only strip if there's still something meaningful left
+  while (segments.length > 1) {
+    const normalized = sanitizeName(segments[0]);
+    if (!DESIGNER_FRIENDLY_COLOR_PREFIXES.has(normalized)) break;
+    segments.shift();
+  }
+
+  return segments.join("/");
+}
+
+function getTailwindColorNamespacesFromScopes(
+  scopes: ReadonlyArray<VariableScope>
+): TailwindColorNamespace[] {
+  const scopeSet = new Set(scopes);
+
+  if (scopeSet.size === 0) return [];
+
+  if (scopeSet.has("ALL_SCOPES")) return ["color"];
+  if (scopeSet.has("ALL_FILLS")) return ["color"];
+
+  const namespaces: TailwindColorNamespace[] = [];
+
+  if (scopeSet.has("FRAME_FILL")) {
+    namespaces.push("background-color");
+  }
+  if (scopeSet.has("SHAPE_FILL")) {
+    namespaces.push("fill");
+  }
+  if (scopeSet.has("TEXT_FILL")) {
+    namespaces.push("text-color");
+  }
+  if (scopeSet.has("STROKE_COLOR")) {
+    namespaces.push("border-color");
+    namespaces.push("outline-color");
+    namespaces.push("ring-color");
+    namespaces.push("divide-color");
+  }
+  if (scopeSet.has("EFFECT_COLOR")) {
+    namespaces.push("shadow-color");
+  }
+
+  return namespaces;
+}
+
+function extractCssVarNameFromCodeSyntax(webSyntax: string): string | null {
+  const match = webSyntax.match(/--[a-zA-Z0-9-_]+/);
+  return match ? match[0] : null;
+}
+
+function getCssVarNameFromCodeSyntax(webSyntax: string): string {
+  const extracted = extractCssVarNameFromCodeSyntax(webSyntax);
+  if (extracted) return extracted;
+
+  const trimmed = webSyntax.trim();
+  if (trimmed.startsWith("--")) return trimmed;
+  return `--${trimmed}`;
+}
+
+function getColorSuffixName(variable: Variable, baseName: string): string {
+  const withoutTailwindNamespace = stripLeadingTailwindNamespaceFromName(baseName);
+  const withoutDesignerPrefix = stripLeadingDesignerFriendlyPrefix(
+    withoutTailwindNamespace
+  );
+  return sanitizeName(withoutDesignerPrefix);
+}
+
+function getColorEmissions(variable: Variable): ColorEmission[] {
+  if (variable.resolvedType !== "COLOR") return [];
+  if (variable.hiddenFromPublishing) return [];
+  if (isOpacityVariant(variable.name)) return [];
+
+  const scopes = variable.scopes ?? [];
+  const namespaces = getTailwindColorNamespacesFromScopes(scopes);
+  if (namespaces.length === 0) return [];
+
+  const { baseName } = splitNameAndLeafVariants(variable.name);
+
+  const webSyntax = variable.codeSyntax?.WEB?.trim();
+  if (webSyntax) {
+    const cssVarName = getCssVarNameFromCodeSyntax(webSyntax);
+    const matchedNamespace = TAILWIND_COLOR_NAMESPACES.find(
+      (ns) => ns !== "custom" && cssVarName.startsWith(`--${ns}-`)
+    );
+
+    return [
+      {
+        namespace: matchedNamespace ?? "custom",
+        cssVarName,
+      },
+    ];
+  }
+
+  const suffix = getColorSuffixName(variable, baseName);
+  return namespaces.map((namespace) => ({
+    namespace,
+    cssVarName: `--${namespace}-${suffix}`,
+  }));
+}
+
 function parseModeVariants(
   modeName: string,
   defaultModeName: string
@@ -133,6 +329,33 @@ function insertIntoVariantTree(
   }
 }
 
+function emitVariantTree(
+  cssOutput: string[],
+  tree: Map<string, VariantNode>
+): void {
+  if (tree.size === 0) return;
+
+  const emitNode = (variantName: string, node: VariantNode, indent: string) => {
+    cssOutput.push(`${indent}@variant ${variantName} {`);
+
+    for (const { name, value } of node.vars) {
+      cssOutput.push(`${indent}  ${name}: ${value};`);
+    }
+
+    for (const [childVariant, childNode] of node.children) {
+      emitNode(childVariant, childNode, `${indent}  `);
+    }
+
+    cssOutput.push(`${indent}}`);
+  };
+
+  cssOutput.push(":root, :host {");
+  for (const [variantName, node] of tree) {
+    emitNode(variantName, node, "  ");
+  }
+  cssOutput.push("}");
+}
+
 function isOpacityVariant(variableName: string): boolean {
   const opacityPattern = /\/\d+$/;
   return opacityPattern.test(variableName);
@@ -181,11 +404,38 @@ function getNamespaceFromVariableName(variableName: string): string | null {
   return null;
 }
 
+function getPreferredColorAliasCssVarName(
+  aliasedVar: Variable,
+  requestedNamespace: TailwindColorNamespace | null,
+  variableMetaMap: Map<string, VariableMeta>
+): string | null {
+  const meta = variableMetaMap.get(aliasedVar.id);
+  if (!meta) return null;
+  if (meta.hiddenFromPublishing) return null;
+
+  const emissions = meta.colorEmissions;
+  if (emissions.size === 0) return null;
+
+  if (requestedNamespace && emissions.has(requestedNamespace)) {
+    return emissions.get(requestedNamespace)!;
+  }
+
+  if (emissions.has("color")) {
+    return emissions.get("color")!;
+  }
+
+  return emissions.values().next().value ?? null;
+}
+
 async function convertValueToCss(
   value: VariableValue,
   resolvedType: string,
   variableMap: Map<string, Variable>,
-  variableName: string
+  variableMetaMap: Map<string, VariableMeta>,
+  variableName: string,
+  modeId: string,
+  targetColorNamespace: TailwindColorNamespace | null,
+  visitedAliasIds: Set<string> = new Set()
 ): Promise<string> {
   // Handle aliases
   if (
@@ -195,27 +445,60 @@ async function convertValueToCss(
     value.type === "VARIABLE_ALIAS"
   ) {
     const aliasedVar = variableMap.get(value.id);
-    if (aliasedVar) {
-      const aliasedValue = Object.values(aliasedVar.valuesByMode)[0];
-      if (
-        aliasedVar.resolvedType === "COLOR" &&
-        isOpacityVariant(aliasedVar.name)
-      ) {
-        if (typeof aliasedValue === "object" && "r" in aliasedValue) {
-          const rgb = aliasedValue as RGB | RGBA;
-          const rgba: RGBA = {
-            r: rgb.r,
-            g: rgb.g,
-            b: rgb.b,
-            a: "a" in rgb ? rgb.a : 1,
-          };
-          return rgbToOklch(rgba);
-        }
+    if (!aliasedVar) return "var(--unknown)";
+
+    if (visitedAliasIds.has(aliasedVar.id)) {
+      return "var(--circular-alias)";
+    }
+
+    const nextVisited = new Set(visitedAliasIds);
+    nextVisited.add(aliasedVar.id);
+
+    const aliasedValue =
+      aliasedVar.valuesByMode[modeId] ?? Object.values(aliasedVar.valuesByMode)[0];
+
+    // Special-case: Tailwind opacity variants (e.g. color/white/4) are skipped
+    // from theme output, so always inline them.
+    if (aliasedVar.resolvedType === "COLOR" && isOpacityVariant(aliasedVar.name)) {
+      return convertValueToCss(
+        aliasedValue,
+        aliasedVar.resolvedType,
+        variableMap,
+        variableMetaMap,
+        aliasedVar.name,
+        modeId,
+        targetColorNamespace,
+        nextVisited
+      );
+    }
+
+    if (aliasedVar.resolvedType === "COLOR") {
+      const cssVarName = getPreferredColorAliasCssVarName(
+        aliasedVar,
+        targetColorNamespace,
+        variableMetaMap
+      );
+
+      // If the referenced variable isn't part of the Tailwind theme output
+      // (hidden from publishing or missing scopes), inline its literal value.
+      if (!cssVarName) {
+        return convertValueToCss(
+          aliasedValue,
+          aliasedVar.resolvedType,
+          variableMap,
+          variableMetaMap,
+          aliasedVar.name,
+          modeId,
+          targetColorNamespace,
+          nextVisited
+        );
       }
-      const cssVarName = variableNameToCssVar(aliasedVar.name);
+
       return `var(${cssVarName})`;
     }
-    return "var(--unknown)";
+
+    const cssVarName = variableNameToCssVar(aliasedVar.name);
+    return `var(${cssVarName})`;
   }
 
   const namespace = getNamespaceFromVariableName(variableName);
@@ -303,9 +586,23 @@ figma.codegen.on("generate", async () => {
 
     // Build a map of all variables for alias resolution
     const variableMap = new Map<string, Variable>();
+    const variableMetaMap = new Map<string, VariableMeta>();
+
     const allVariables = await figma.variables.getLocalVariablesAsync();
     for (const variable of allVariables) {
       variableMap.set(variable.id, variable);
+
+      const colorEmissions = new Map<TailwindColorNamespace, string>();
+      for (const emission of getColorEmissions(variable)) {
+        colorEmissions.set(emission.namespace, emission.cssVarName);
+      }
+
+      variableMetaMap.set(variable.id, {
+        hiddenFromPublishing: variable.hiddenFromPublishing,
+        scopes: variable.scopes ?? [],
+        codeSyntaxWeb: variable.codeSyntax?.WEB,
+        colorEmissions,
+      });
     }
 
     // Categorize collections
@@ -398,26 +695,44 @@ figma.codegen.on("generate", async () => {
 
           // Parse as utility-scoped variable if applicable
           const utilParse = parseUtilityVariableName(variable.name);
-          const cssValue = await convertValueToCss(
-            value,
-            variable.resolvedType,
-            variableMap,
-            variable.name
-          );
-          const compareCssValue =
-            compareValue !== undefined
-              ? await convertValueToCss(
-                  compareValue,
-                  variable.resolvedType,
-                  variableMap,
-                  variable.name
-                )
-              : null;
 
           if (utilParse && utilParse.canonicalVarSegments.length > 0) {
-            const baseName = getCanonicalVarName(
-              utilParse.canonicalVarSegments
+            const baseName = getCanonicalVarName(utilParse.canonicalVarSegments);
+
+            const targetColorNamespace = TAILWIND_COLOR_NAMESPACES.includes(
+              utilParse.canonicalVarSegments[0] as TailwindColorNamespace
+            )
+              ? (utilParse.canonicalVarSegments[0] as TailwindColorNamespace)
+              : null;
+
+            if (variable.resolvedType === "COLOR") {
+              const meta = variableMetaMap.get(variable.id);
+              if (!meta || meta.colorEmissions.size === 0) continue;
+            }
+
+            const cssValue = await convertValueToCss(
+              value,
+              variable.resolvedType,
+              variableMap,
+              variableMetaMap,
+              variable.name,
+              mode.modeId,
+              targetColorNamespace
             );
+
+            const compareCssValue =
+              compareValue !== undefined
+                ? await convertValueToCss(
+                    compareValue,
+                    variable.resolvedType,
+                    variableMap,
+                    variableMetaMap,
+                    variable.name,
+                    compareMode.modeId,
+                    targetColorNamespace
+                  )
+                : null;
+
             const leafVariants = getSanitizedVariants(utilParse.variant);
             for (const leafVariant of leafVariants) {
               if (!utilityVariantMap[utilParse.utilityName])
@@ -434,8 +749,85 @@ figma.codegen.on("generate", async () => {
             continue;
           }
 
+          // Scope-driven Tailwind colors
+          if (variable.resolvedType === "COLOR") {
+            const meta = variableMetaMap.get(variable.id);
+            if (!meta || meta.colorEmissions.size === 0) continue;
+
+            const { leafVariants } = splitNameAndLeafVariants(variable.name);
+
+            for (const [namespace, emittedName] of meta.colorEmissions) {
+              const cssValue = await convertValueToCss(
+                value,
+                variable.resolvedType,
+                variableMap,
+                variableMetaMap,
+                variable.name,
+                mode.modeId,
+                namespace
+              );
+
+              const compareCssValue =
+                compareValue !== undefined
+                  ? await convertValueToCss(
+                      compareValue,
+                      variable.resolvedType,
+                      variableMap,
+                      variableMetaMap,
+                      variable.name,
+                      compareMode.modeId,
+                      namespace
+                    )
+                  : null;
+
+              if (isDefault) {
+                if (leafVariants.length > 0) {
+                  insertIntoVariantTree(variantTree, leafVariants, [
+                    { name: emittedName, value: cssValue },
+                  ]);
+                } else {
+                  themeVars.push({ name: emittedName, value: cssValue });
+                }
+              } else {
+                if (cssValue !== compareCssValue) {
+                  const fullVariantPath =
+                    leafVariants.length > 0
+                      ? [...rootVariants, ...leafVariants]
+                      : rootVariants;
+                  insertIntoVariantTree(variantTree, fullVariantPath, [
+                    { name: emittedName, value: cssValue },
+                  ]);
+                }
+              }
+            }
+            continue;
+          }
+
           // Fallback to normal theme/variant logic
           const { baseName, leafVariants } = parseVariableName(variable.name);
+          const cssValue = await convertValueToCss(
+            value,
+            variable.resolvedType,
+            variableMap,
+            variableMetaMap,
+            variable.name,
+            mode.modeId,
+            null
+          );
+
+          const compareCssValue =
+            compareValue !== undefined
+              ? await convertValueToCss(
+                  compareValue,
+                  variable.resolvedType,
+                  variableMap,
+                  variableMetaMap,
+                  variable.name,
+                  compareMode.modeId,
+                  null
+                )
+              : null;
+
           if (isDefault) {
             if (leafVariants.length > 0) {
               insertIntoVariantTree(variantTree, leafVariants, [
@@ -466,6 +858,12 @@ figma.codegen.on("generate", async () => {
         cssOutput.push(`  ${name}: ${value};`);
       }
       cssOutput.push("}");
+    }
+
+    // Output mode/leaf variants (e.g. dark mode overrides)
+    if (variantTree.size > 0) {
+      cssOutput.push("");
+      emitVariantTree(cssOutput, variantTree);
     }
 
     // Output @utility blocks for utility-scoped variables
@@ -500,13 +898,21 @@ figma.codegen.on("generate", async () => {
             collection.variableIds.map(async (id) => {
               const v = await figma.variables.getVariableByIdAsync(id);
               return v
-                ? {
-                    name: v.name,
-                    resolvedType: v.resolvedType,
-                    valuesByMode: v.valuesByMode,
-                    parsed: parseVariableName(v.name),
-                  }
-                : null;
+                  ? {
+                      name: v.name,
+                      resolvedType: v.resolvedType,
+                      hiddenFromPublishing: v.hiddenFromPublishing,
+                      scopes: v.scopes ?? [],
+                      codeSyntax: v.codeSyntax,
+                      valuesByMode: v.valuesByMode,
+                      parsed: parseVariableName(v.name),
+                      tailwind: {
+                        colorEmissions: Array.from(
+                          variableMetaMap.get(v.id)?.colorEmissions ?? []
+                        ),
+                      },
+                    }
+                  : null;
             })
           ),
         }))

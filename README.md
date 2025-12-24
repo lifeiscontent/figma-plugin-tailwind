@@ -16,7 +16,7 @@ Export your Figma design tokens and variables to Tailwind CSS v4's `@theme` form
    - Example: `@utility/bg-button-primary/@variant/active/background-color/button-primary`
    - The last segment is always the canonical variable name you want to override.
    - This emits an `@utility` block with `@variant` children for each state.
-5. **Add an `@custom-variant` collection** to define custom selectors (e.g., `dark` → `(&:where(.dark, .dark *))`).
+5. **Optional:** Add an `@custom-variant` collection to define extra custom selectors (only needed if you want variants beyond Tailwind’s defaults).
 6. **Export and copy the generated CSS** into your Tailwind v4 project.
 
 ## Figma Variable Naming
@@ -62,6 +62,22 @@ Add a Figma collection named `@custom-variant` to define custom selectors (e.g.,
 ## Variable Namespace Prefixes
 
 Use Tailwind v4 namespace prefixes for your variables:
+
+You can either encode the namespace in the variable name (e.g. `text-color/heading`), or (recommended for designers) let the plugin infer it from Figma variable scopes.
+
+The plugin also strips common designer-friendly prefix folders like `stroke/`, `effects/`, or `Fill Text/` when generating the final Tailwind variable name.
+
+**Scope-based color inference**
+
+- `ALL_FILLS`/`ALL_SCOPES` → `--color-*`
+- `FRAME_FILL` → `--background-color-*`
+- `SHAPE_FILL` → `--fill-*`
+- `TEXT_FILL` → `--text-color-*`
+- `STROKE_COLOR` → `--border-color-*`, `--outline-color-*`, `--ring-color-*`, `--divide-color-*`
+- `EFFECT_COLOR` → `--shadow-color-*`
+- Colors with no scopes are skipped.
+- Colors with `hiddenFromPublishing` enabled are skipped.
+- If WEB code syntax is set, the CSS variable name is used as-is and only one variable is emitted.
 
 | Prefix            | Example Variable                | Output CSS Variable           | Tailwind Utilities         |
 |-------------------|---------------------------------|------------------------------|---------------------------|
