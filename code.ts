@@ -7,7 +7,7 @@ function getSanitizedVariants(variant: string): string[] {
 }
 // Returns canonical CSS variable name from segments
 function getCanonicalVarName(segments: string[]): string {
-  return `--${sanitizeName(segments.join("-"))}`;
+  return normalizeTailwindCssVarName(`--${sanitizeName(segments.join("-"))}`);
 }
 // Returns { isUtility, utilityName, variant, canonicalVarSegments } if @utility, else null
 function parseUtilityVariableName(name: string): null | {
@@ -73,8 +73,19 @@ function sanitizeName(name: string): string {
   return name
     .replace(/\//g, "-")
     .replace(/\s+/g, "-")
-    .replace(/[^a-zA-Z0-9-]/g, "")
+    .replace(/[^a-zA-Z0-9-_]/g, "")
     .toLowerCase();
+}
+
+function normalizeTailwindCssVarName(cssVarName: string): string {
+  // Tailwind uses fractional spacing utilities like `p-0.5`.
+  // In CSS variables, a literal `.` must be escaped, so we let designers use `_` in Figma.
+  // Example: `spacing/0_5` -> `--spacing-0\.5`
+  if (cssVarName.startsWith("--spacing-")) {
+    return cssVarName.replace(/(\d)_(\d)/g, "$1\\.$2");
+  }
+
+  return cssVarName;
 }
 
 const TAILWIND_COLOR_NAMESPACES = [
@@ -361,6 +372,20 @@ function isOpacityVariant(variableName: string): boolean {
   return opacityPattern.test(variableName);
 }
 
+function isNegativeSpacingToken(variableName: string): boolean {
+  // Tailwind provides negative spacing utilities automatically (e.g. `-m-1`),
+  // so designers shouldn't need to create separate `spacing/-1` tokens in Figma.
+  if (variableName.startsWith("@utility/")) return false;
+
+  const segments = variableName.split("/");
+  if (segments.length < 2) return false;
+
+  const namespace = sanitizeName(segments[0]);
+  if (namespace !== "spacing") return false;
+
+  return segments[1].trim().startsWith("-");
+}
+
 function isCustomVariantCollection(collectionName: string): boolean {
   return collectionName.trim() === "@custom-variant";
 }
@@ -373,7 +398,9 @@ function parseVariableName(name: string): {
   const variantIdx = segments.indexOf("@variant");
   if (variantIdx > 0 && variantIdx < segments.length - 1) {
     const baseSegments = segments.slice(0, variantIdx);
-    const baseName = `--${sanitizeName(baseSegments.join("-"))}`;
+    const baseName = normalizeTailwindCssVarName(
+      `--${sanitizeName(baseSegments.join("-"))}`
+    );
     // Support comma-separated variants after @variant
     const leafVariants = segments[variantIdx + 1]
       .split(",")
@@ -382,15 +409,15 @@ function parseVariableName(name: string): {
     return { baseName, leafVariants };
   }
   // No @variant, treat as regular theme token
-  return { baseName: `--${sanitizeName(name)}`, leafVariants: [] };
+  return { baseName: normalizeTailwindCssVarName(`--${sanitizeName(name)}`), leafVariants: [] };
 }
 
 function variableNameToCssVar(name: string): string {
   if (name.startsWith("--")) {
-    return name;
+    return normalizeTailwindCssVarName(name);
   }
   const sanitized = sanitizeName(name);
-  return `--${sanitized}`;
+  return normalizeTailwindCssVarName(`--${sanitized}`);
 }
 
 function getNamespaceFromVariableName(variableName: string): string | null {
@@ -683,6 +710,10 @@ figma.codegen.on("generate", async () => {
           if (value === undefined) continue;
 
           if (!["COLOR", "FLOAT", "STRING"].includes(variable.resolvedType)) {
+            continue;
+          }
+
+          if (variable.resolvedType === "FLOAT" && isNegativeSpacingToken(variable.name)) {
             continue;
           }
 

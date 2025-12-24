@@ -67,6 +67,17 @@ You can either encode the namespace in the variable name (e.g. `text-color/headi
 
 The plugin also strips common designer-friendly prefix folders like `stroke/`, `effects/`, or `Fill Text/` when generating the final Tailwind variable name.
 
+**Fractional spacing in Figma**
+
+Tailwind spacing utilities support fractional steps like `p-0.5`, but a literal `.` is not usable directly in Figma token names.
+Use an underscore to represent the decimal point in spacing names.
+
+Also, don’t create separate negative spacing tokens like `spacing/-1` — Tailwind already generates negative spacing utilities automatically.
+
+- Figma: `spacing/0_5`
+- Output: `--spacing-0\.5`
+- Utility: `p-0.5`
+
 **Scope-based color inference**
 
 - `ALL_FILLS`/`ALL_SCOPES` → `--color-*`
